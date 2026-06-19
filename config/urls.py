@@ -18,6 +18,9 @@ urlpatterns = [
     # Mount messaging endpoints
     path('api/messages/', include('apps.messaging.urls')),
     
+    # Mount integrations endpoints
+    path('api/integrations/', include('apps.messaging.urls_integrations')),
+    
     # Mount analytics endpoints
     path('api/analytics/', include('apps.analytics.urls')),
 ]

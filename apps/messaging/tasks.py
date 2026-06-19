@@ -1,10 +1,21 @@
 import time
 import random
+import socket
 from celery import shared_task
 from django.utils import timezone
 from apps.campaigns.models import CampaignRun
 from apps.crm.models import Lead
 from apps.messaging.models import Message
+
+def is_redis_running():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.1)
+        s.connect(('localhost', 6379))
+        s.close()
+        return True
+    except Exception:
+        return False
 
 def render_template(body, lead):
     """
@@ -95,8 +106,14 @@ def execute_campaign_run_task(campaign_run_id):
         )
         
         # Trigger sending.
-        # Use delay() to run in Celery, but fallback to synchronous call if celery is not running in tests.
-        send_message_task.delay(msg.id)
+        # Use delay() if Redis is running, otherwise call synchronously to avoid connection delays.
+        if is_redis_running():
+            try:
+                send_message_task.delay(msg.id)
+            except Exception:
+                send_message_task(msg.id)
+        else:
+            send_message_task(msg.id)
 
     run.status = 'Completed'
     run.completed_at = timezone.now()

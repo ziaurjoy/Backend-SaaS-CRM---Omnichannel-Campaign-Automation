@@ -29,12 +29,15 @@ class CampaignViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         )
 
         # Execute Celery task with synchronous fallback
-        from apps.messaging.tasks import execute_campaign_run_task
-        try:
-            execute_campaign_run_task.delay(run.id)
-            executed_async = True
-        except Exception as e:
-            # Fallback to synchronous run if celery/redis is offline
+        from apps.messaging.tasks import execute_campaign_run_task, is_redis_running
+        if is_redis_running():
+            try:
+                execute_campaign_run_task.delay(run.id)
+                executed_async = True
+            except Exception as e:
+                execute_campaign_run_task(run.id)
+                executed_async = False
+        else:
             execute_campaign_run_task(run.id)
             executed_async = False
 

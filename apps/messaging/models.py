@@ -2,6 +2,7 @@ from django.db import models
 from apps.crm.models import Lead
 from apps.templates.models import Template
 from apps.campaigns.models import CampaignRun
+from apps.tenants.models import Business
 
 class Message(models.Model):
     CHANNEL_CHOICES = (
@@ -29,3 +30,27 @@ class Message(models.Model):
 
     def __str__(self):
         return f"{self.channel} to {self.recipient} ({self.status})"
+
+class Integration(models.Model):
+    PROVIDER_CHOICES = (
+        ('Gmail', 'Gmail'),
+        ('WhatsApp', 'WhatsApp'),
+    )
+    STATUS_CHOICES = (
+        ('Connected', 'Connected'),
+        ('Disconnected', 'Disconnected'),
+    )
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='integrations')
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    credentials = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Disconnected')
+    connected_email = models.CharField(max_length=255, blank=True, null=True)
+    connected_phone = models.CharField(max_length=50, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('business', 'provider')
+
+    def __str__(self):
+        return f"{self.provider} ({self.status}) - {self.business.name}"
