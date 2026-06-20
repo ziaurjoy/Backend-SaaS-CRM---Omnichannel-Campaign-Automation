@@ -10,3 +10,4 @@ __pycache__
 *.pot
 *.mo
 *.swp
+db.sqlite3
