@@ -156,3 +156,9 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'UTC'
+
+# Meta Embedded Signup settings
+META_APP_ID = os.environ.get('META_APP_ID', '')
+META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
+META_REDIRECT_URI = os.environ.get('META_REDIRECT_URI', 'http://localhost:3000/dashboard/integrations/meta-callback')
+META_CONFIG_ID = os.environ.get('META_CONFIG_ID', '')
