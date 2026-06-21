@@ -48,6 +48,19 @@ class CampaignViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
             "run": serializer.data
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get'], url_path='messages')
+    def get_messages(self, request, pk=None):
+        campaign = self.get_object()
+        from apps.messaging.models import Message
+        from apps.messaging.serializers import MessageSerializer
+        
+        messages = Message.objects.filter(
+            campaign_run__campaign=campaign
+        ).select_related('lead', 'campaign_run', 'campaign_run__campaign')
+        
+        serializer = MessageSerializer(messages, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
 class CampaignRunViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CampaignRunSerializer
     permission_classes = [permissions.IsAuthenticated]

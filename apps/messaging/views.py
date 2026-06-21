@@ -208,3 +208,97 @@ class IntegrationViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         )
         serializer = self.get_serializer(integration)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='exchange_google_code')
+    def exchange_google_code(self, request):
+        code = request.data.get('code')
+        if not code:
+            return Response({'detail': 'code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        client_id = getattr(settings, 'GOOGLE_CLIENT_ID', '')
+        client_secret = getattr(settings, 'GOOGLE_CLIENT_SECRET', '')
+
+        # Check if running in Sandbox Mock Mode (no client ID or client secret)
+        if not client_id or not client_secret:
+            # Sandbox Mock Mode fallback
+            email = "joy.python.dev@gmail.com"
+            credentials = {
+                "access_token": "mock_gmail_access_token",
+                "refresh_token": "mock_gmail_refresh_token",
+                "expires_in": 3600,
+                "scope": "https://www.googleapis.com/auth/gmail.send",
+                "token_type": "Bearer"
+            }
+            integration, created = Integration.objects.update_or_create(
+                business=request.business,
+                provider='Gmail',
+                defaults={
+                    'credentials': credentials,
+                    'status': 'Connected',
+                    'connected_email': email
+                }
+            )
+            serializer = self.get_serializer(integration)
+            return Response({
+                'message': 'Gmail successfully connected via simulated Google OAuth.',
+                'integration': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        # Real Google exchange
+        import requests
+        import time
+
+        # Google token endpoint
+        token_url = "https://oauth2.googleapis.com/token"
+        payload = {
+            'code': code,
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'redirect_uri': 'postmessage',
+            'grant_type': 'authorization_code'
+        }
+
+        try:
+            response = requests.post(token_url, data=payload, timeout=10)
+            if response.status_code != 200:
+                return Response({'detail': f'Google token exchange failed: {response.text}'}, status=status.HTTP_400_BAD_REQUEST)
+
+            token_data = response.json()
+            access_token = token_data.get('access_token')
+            refresh_token = token_data.get('refresh_token')
+            expires_in = token_data.get('expires_in', 3600)
+
+            # Fetch user email dynamically from Google API using the access token
+            user_info_url = "https://www.googleapis.com/oauth2/v3/userinfo"
+            headers = { "Authorization": f"Bearer {access_token}" }
+            user_info_res = requests.get(user_info_url, headers=headers, timeout=10)
+            if user_info_res.status_code != 200:
+                return Response({'detail': f'Failed to fetch user email from Google: {user_info_res.text}'}, status=status.HTTP_400_BAD_REQUEST)
+
+            user_info = user_info_res.json()
+            email = user_info.get('email')
+            if not email:
+                return Response({'detail': 'No email address returned from Google.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Store expires_at as current timestamp + expires_in
+            token_data['expires_at'] = time.time() + expires_in
+
+            integration, created = Integration.objects.update_or_create(
+                business=request.business,
+                provider='Gmail',
+                defaults={
+                    'credentials': token_data,
+                    'status': 'Connected',
+                    'connected_email': email
+                }
+            )
+
+            serializer = self.get_serializer(integration)
+            return Response({
+                'message': 'Gmail successfully connected via Google OAuth.',
+                'integration': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({'detail': f'Google connection error: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

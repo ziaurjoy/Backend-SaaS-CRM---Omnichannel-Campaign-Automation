@@ -15,6 +15,7 @@ class Message(models.Model):
         ('Delivered', 'Delivered'),
         ('Opened', 'Opened'),
         ('Failed', 'Failed'),
+        ('Replied', 'Replied'),
     )
     campaign_run = models.ForeignKey(CampaignRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='messages')
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='messages')
@@ -22,6 +23,8 @@ class Message(models.Model):
     channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES)
     recipient = models.CharField(max_length=255)  # Email or Phone number
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    is_replied = models.BooleanField(default=False)
+    replied_at = models.DateTimeField(blank=True, null=True)
     sent_at = models.DateTimeField(blank=True, null=True)
     delivered_at = models.DateTimeField(blank=True, null=True)
     opened_at = models.DateTimeField(blank=True, null=True)

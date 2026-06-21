@@ -4,7 +4,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 
 # Load env variables from a .env file if it exists
-load_dotenv()
+load_dotenv(override=True)
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -162,3 +162,7 @@ META_APP_ID = os.environ.get('META_APP_ID', '')
 META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
 META_REDIRECT_URI = os.environ.get('META_REDIRECT_URI', 'http://localhost:3000/dashboard/integrations/meta-callback')
 META_CONFIG_ID = os.environ.get('META_CONFIG_ID', '')
+
+# Google OAuth settings
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
