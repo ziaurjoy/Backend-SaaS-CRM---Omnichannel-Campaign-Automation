@@ -11,3 +11,6 @@ __pycache__
 *.mo
 *.swp
 db.sqlite3
+.env
+.vscode
+.venv

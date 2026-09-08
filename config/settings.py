@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
+import dj_database_url
 
 # Load env variables from a .env file if it exists
 load_dotenv(override=True)
@@ -22,12 +23,12 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    
+
     # Third party apps
     'corsheaders',
     'rest_framework',
     'rest_framework_simplejwt',
-    
+
     # Custom apps
     'apps.authentication',
     'apps.tenants',
@@ -69,31 +70,44 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database configuration with Postgres options and SQLite fallback
-DB_NAME = os.environ.get('DB_NAME')
-DB_USER = os.environ.get('DB_USER')
-DB_PASSWORD = os.environ.get('DB_PASSWORD')
-DB_HOST = os.environ.get('DB_HOST')
-DB_PORT = os.environ.get('DB_PORT', '5432')
+# DB_NAME = os.environ.get('DB_NAME')
+# DB_USER = os.environ.get('DB_USER')
+# DB_PASSWORD = os.environ.get('DB_PASSWORD')
+# DB_HOST = os.environ.get('DB_HOST')
+# DB_PORT = os.environ.get('DB_PORT', '5432')
 
-if DB_NAME and DB_USER:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': DB_NAME,
-            'USER': DB_USER,
-            'PASSWORD': DB_PASSWORD,
-            'HOST': DB_HOST,
-            'PORT': DB_PORT,
-        }
-    }
-else:
-    # Fallback to local SQLite database
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
+# if DB_NAME and DB_USER:
+#     DATABASES = {
+#         'default': {
+#             'ENGINE': 'django.db.backends.postgresql',
+#             'NAME': DB_NAME,
+#             'USER': DB_USER,
+#             'PASSWORD': DB_PASSWORD,
+#             'HOST': DB_HOST,
+#             'PORT': DB_PORT,
+#         }
+#     }
+# else:
+#     # Fallback to local SQLite database
+#     DATABASES = {
+#         'default': {
+#             'ENGINE': 'django.db.backends.sqlite3',
+#             'NAME': BASE_DIR / 'db.sqlite3',
+#         }
+#     }
+
+
+DATABASES = {
+
+
+    "default": dj_database_url.parse(
+        os.environ.get("DATABASE_URL")
+    )
+
+
+
+
+}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
