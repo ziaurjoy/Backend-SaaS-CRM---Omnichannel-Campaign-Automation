@@ -15,9 +15,14 @@ from apps.messaging.models import Message
 
 def is_redis_running():
     try:
+        from urllib.parse import urlparse
+        broker_url = getattr(settings, 'CELERY_BROKER_URL', 'redis://localhost:6379/0')
+        parsed = urlparse(broker_url)
+        host = parsed.hostname or 'localhost'
+        port = parsed.port or 6379
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.1)
-        s.connect(('localhost', 6379))
+        s.settimeout(0.5)
+        s.connect((host, port))
         s.close()
         return True
     except Exception:
@@ -277,7 +282,7 @@ def send_message_task(message_id):
 
         if wa_integration and wa_integration.credentials and wa_integration.credentials.get('link_type') == 'WhatsApp_Standard_QR':
             session_id = wa_integration.credentials.get('session_id', f"wa_business_{business.id}")
-            service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', 'http://localhost:3001')
+            service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', None) or os.environ.get('WHATSAPP_SERVICE_URL', 'http://localhost:3001')
             try:
                 res = requests.post(f"{service_url}/message/send", json={
                     'sessionId': session_id,
@@ -289,8 +294,17 @@ def send_message_task(message_id):
                     msg.delivered_at = timezone.now()
                     msg.save()
                 else:
+                    err_msg = res.text
+                    try:
+                        err_data = res.json()
+                        err_msg = err_data.get('error') or err_data.get('detail') or res.text
+                    except Exception:
+                        pass
+                    if 'not connected or active' in str(err_msg).lower():
+                        msg.failed_reason = "WhatsApp session is not active. Please scan the QR code on the Integrations page to link your WhatsApp account."
+                    else:
+                        msg.failed_reason = f"WhatsApp service error: {err_msg}"
                     msg.status = 'Failed'
-                    msg.failed_reason = f"Baileys API error: {res.text}"
                     msg.save()
             except Exception as e:
                 msg.status = 'Failed'

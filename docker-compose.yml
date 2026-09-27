@@ -12,9 +12,14 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    command: gunicorn --bind 0.0.0.0:8000 --workers 3 config.wsgi:application
+    volumes:
+      - .:/app
+    command: sh -c "python manage.py migrate && gunicorn --bind 0.0.0.0:8000 --workers 3 config.wsgi:application"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
   celery:
     build:
@@ -25,26 +30,25 @@ services:
     restart: always
     env_file:
       - .env
+    volumes:
+      - .:/app
     command: celery -A config worker --loglevel=info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
 
   redis:
     image: redis:7-alpine
     container_name: omnichannel_backend_redis
     restart: always
     ports:
-      - "6379:6379"
-
-  whatsapp_service:
-    build:
-      context: ../whatsapp-service
-      dockerfile: Dockerfile
-    image: omnichannel-whatsapp-service:latest
-    container_name: omnichannel_whatsapp_service
-    restart: always
-    ports:
-      - "3001:3001"
-    environment:
-      - PORT=3001
-
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

@@ -308,7 +308,7 @@ class IntegrationViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         import time
 
         session_id = f"wa_business_{request.business.id}"
-        service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', 'http://localhost:3001')
+        service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', None) or os.environ.get('WHATSAPP_SERVICE_URL', 'http://localhost:3001')
 
         try:
             res = requests.post(f"{service_url}/session/connect", json={'session_id': session_id}, timeout=8)
@@ -347,7 +347,7 @@ class IntegrationViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         import requests
 
         session_id = f"wa_business_{request.business.id}"
-        service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', 'http://localhost:3001')
+        service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', None) or os.environ.get('WHATSAPP_SERVICE_URL', 'http://localhost:3001')
 
         try:
             res = requests.get(f"{service_url}/session/status/{session_id}", timeout=5)
@@ -400,7 +400,7 @@ class IntegrationViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         import requests
 
         session_id = f"wa_business_{request.business.id}"
-        service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', 'http://localhost:3001')
+        service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', None) or os.environ.get('WHATSAPP_SERVICE_URL', 'http://localhost:3001')
 
         try:
             requests.post(f"{service_url}/session/logout/{session_id}", timeout=5)
