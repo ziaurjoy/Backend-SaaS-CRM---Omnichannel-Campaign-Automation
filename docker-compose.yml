@@ -35,3 +35,16 @@ services:
     restart: always
     ports:
       - "6379:6379"
+
+  whatsapp_service:
+    build:
+      context: ../whatsapp-service
+      dockerfile: Dockerfile
+    image: omnichannel-whatsapp-service:latest
+    container_name: omnichannel_whatsapp_service
+    restart: always
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+

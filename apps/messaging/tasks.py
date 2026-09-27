@@ -25,21 +25,63 @@ def is_redis_running():
 
 def render_template(body, lead):
     """
-    Replaces variables like {{first_name}}, {{company_name}}, etc. in the body.
+    Automatically populates the customer's (Lead) information into template placeholders.
+    Supports double {{var}} and single {var} curly braces, case-insensitively.
     """
-    first_name = lead.name.split(' ')[0] if lead.name else ''
-    last_name = lead.name.split(' ')[1] if lead.name and len(lead.name.split(' ')) > 1 else ''
-    company_name = lead.name  # Fallback to lead name
+    import re
+    if not body:
+        return ""
+    if not lead:
+        return body
+
+    full_name = lead.name or ''
+    name_parts = full_name.split(' ') if full_name else ['']
+    first_name = name_parts[0]
+    last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
+    company_name = getattr(lead, 'company_name', None) or full_name
     email = lead.email or ''
     phone = lead.phone or ''
-    
+    address = lead.address or ''
+    website = lead.website or ''
+    stage = lead.stage or ''
+    status_val = lead.status or ''
+    business_name = lead.business.name if getattr(lead, 'business', None) else ''
+
+    replacements = {
+        'first_name': first_name,
+        'firstname': first_name,
+        'last_name': last_name,
+        'lastname': last_name,
+        'name': full_name,
+        'full_name': full_name,
+        'lead_name': full_name,
+        'customer_name': full_name,
+        'company_name': company_name,
+        'company': company_name,
+        'email': email,
+        'phone': phone,
+        'phone_number': phone,
+        'address': address,
+        'website': website,
+        'stage': stage,
+        'status': status_val,
+        'business_name': business_name,
+    }
+
     rendered = body
-    rendered = rendered.replace('{{first_name}}', first_name)
-    rendered = rendered.replace('{{last_name}}', last_name)
-    rendered = rendered.replace('{{company_name}}', company_name)
-    rendered = rendered.replace('{{email}}', email)
-    rendered = rendered.replace('{{phone}}', phone)
+
+    # Replace double curly braces {{key}} case-insensitively
+    for key, val in replacements.items():
+        pattern_double = re.compile(r'\{\{\s*' + re.escape(key) + r'\s*\}\}', re.IGNORECASE)
+        rendered = pattern_double.sub(str(val), rendered)
+
+    # Replace single curly braces {key} case-insensitively (excluding double ones)
+    for key, val in replacements.items():
+        pattern_single = re.compile(r'(?<!\{)\{\s*' + re.escape(key) + r'\s*\}(?!\})', re.IGNORECASE)
+        rendered = pattern_single.sub(str(val), rendered)
+
     return rendered
+
 
 def send_gmail_via_api(access_token, from_email, to_email, subject, body_text):
     try:
@@ -224,37 +266,62 @@ def send_message_task(message_id):
         msg.failed_reason = gmail_error
         msg.save()
         
-    else:
-        # WhatsApp or other channel -> simulated sending as before
-        time.sleep(0.5)
-        success = random.random() < 0.95
-        if success:
-            msg.status = 'Delivered'
-            msg.delivered_at = timezone.now()
-            msg.save()
-            
-            # Simulate open rate (60% open rate)
-            if random.random() < 0.60:
-                time.sleep(0.5)
-                msg.status = 'Opened'
-                msg.opened_at = timezone.now()
-                msg.save()
-                
-                # Simulate response/reply (25% reply rate if opened)
-                if random.random() < 0.25:
-                    time.sleep(0.5)
-                    msg.status = 'Replied'
-                    msg.is_replied = True
-                    msg.replied_at = timezone.now()
+    elif msg.channel == 'WhatsApp':
+        from apps.messaging.models import Integration
+        wa_integration = None
+        if business:
+            try:
+                wa_integration = Integration.objects.get(business=business, provider='WhatsApp', status='Connected')
+            except Integration.DoesNotExist:
+                pass
+
+        if wa_integration and wa_integration.credentials and wa_integration.credentials.get('link_type') == 'WhatsApp_Standard_QR':
+            session_id = wa_integration.credentials.get('session_id', f"wa_business_{business.id}")
+            service_url = getattr(settings, 'WHATSAPP_SERVICE_URL', 'http://localhost:3001')
+            try:
+                res = requests.post(f"{service_url}/message/send", json={
+                    'sessionId': session_id,
+                    'to': recipient,
+                    'message': body
+                }, timeout=10)
+                if res.status_code == 200:
+                    msg.status = 'Delivered'
+                    msg.delivered_at = timezone.now()
                     msg.save()
+                else:
+                    msg.status = 'Failed'
+                    msg.failed_reason = f"Baileys API error: {res.text}"
+                    msg.save()
+            except Exception as e:
+                msg.status = 'Failed'
+                msg.failed_reason = f"Could not connect to WhatsApp service: {str(e)}"
+                msg.save()
         else:
-            msg.status = 'Failed'
-            msg.failed_reason = random.choice([
-                "Connection timeout to server",
-                "API service authentication failed",
-                "Invalid recipient format"
-            ])
-            msg.save()
+            # Simulated fallback for sandbox mode
+            time.sleep(0.5)
+            success = random.random() < 0.95
+            if success:
+                msg.status = 'Delivered'
+                msg.delivered_at = timezone.now()
+                msg.save()
+
+                if random.random() < 0.60:
+                    time.sleep(0.5)
+                    msg.status = 'Opened'
+                    msg.opened_at = timezone.now()
+                    msg.save()
+
+                    if random.random() < 0.25:
+                        time.sleep(0.5)
+                        msg.status = 'Replied'
+                        msg.is_replied = True
+                        msg.replied_at = timezone.now()
+                        msg.save()
+            else:
+                msg.status = 'Failed'
+                msg.failed_reason = "Recipient unavailable or network timeout"
+                msg.save()
+
 
 @shared_task
 def execute_campaign_run_task(campaign_run_id):

@@ -175,6 +175,11 @@ CELERY_TIMEZONE = 'UTC'
 META_APP_ID = os.environ.get('META_APP_ID', '')
 META_APP_SECRET = os.environ.get('META_APP_SECRET', '')
 META_REDIRECT_URI = os.environ.get('META_REDIRECT_URI', 'http://localhost:3000/dashboard/integrations/meta-callback')
+
+# AI Provider API Keys
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+
 META_CONFIG_ID = os.environ.get('META_CONFIG_ID', '')
 
 # Google OAuth settings
