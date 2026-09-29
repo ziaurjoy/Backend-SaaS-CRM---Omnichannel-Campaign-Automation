@@ -11,6 +11,7 @@ class Message(models.Model):
     )
     STATUS_CHOICES = (
         ('Pending', 'Pending'),
+        ('Processing', 'Processing'),  # Actively being sent — used as a soft lock
         ('Sent', 'Sent'),
         ('Delivered', 'Delivered'),
         ('Opened', 'Opened'),

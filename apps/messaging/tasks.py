@@ -1,3 +1,4 @@
+import os
 import time
 import random
 import socket
@@ -120,7 +121,6 @@ def send_gmail_via_api(access_token, from_email, to_email, subject, body_text):
         return False, str(e)
 
 def get_fresh_gmail_token(integration):
-    import os
     credentials = integration.credentials or {}
     access_token = credentials.get('access_token') or credentials.get('oauth_token')
     refresh_token = credentials.get('refresh_token')
@@ -176,10 +176,13 @@ def send_message_task(message_id):
         msg = Message.objects.get(id=message_id)
     except Message.DoesNotExist:
         return
-        
-    msg.status = 'Sent'
+
+    # Mark as Processing immediately — acts as a soft lock to prevent duplicate resets
+    msg.status = 'Processing'
+    msg.save(update_fields=['status'])
+
     msg.sent_at = timezone.now()
-    msg.save()
+    msg.save(update_fields=['sent_at'])
 
     # Determine details
     business = msg.campaign_run.campaign.business if (msg.campaign_run and msg.campaign_run.campaign) else None
@@ -243,7 +246,7 @@ def send_message_task(message_id):
                 except Exception as smtp_err:
                     gmail_error = f"SMTP error: {str(smtp_err)}"
 
-    # Set status
+    # Set final status
     if msg.channel == 'Email' and (sent_real or not gmail_error):
         # Successfully sent via Gmail API or SMTP (or simulated fallback)
         msg.status = 'Delivered'
@@ -343,29 +346,49 @@ def execute_campaign_run_task(campaign_run_id):
         run = CampaignRun.objects.get(id=campaign_run_id)
     except CampaignRun.DoesNotExist:
         return
-        
+
     campaign = run.campaign
+
+    # Determine the leads to process
     if campaign.target_collection:
         leads = Lead.objects.filter(business=campaign.business, collection=campaign.target_collection)
     else:
         leads = Lead.objects.filter(business=campaign.business)
-    
+
     if not leads.exists():
         run.status = 'Completed'
         run.completed_at = timezone.now()
         run.save()
+        campaign.status = 'Completed'
+        campaign.save(update_fields=['status'])
         return
 
-    # Process each lead
+    first_message = True  # Do NOT delay before the very first message
+
     for lead in leads:
+        # --- Pause check: re-read status from DB each iteration ---
+        campaign.refresh_from_db(fields=['status'])
+        if campaign.status == 'Paused':
+            # Stop picking up new recipients; let the current one finish
+            break
+
         # Determine recipient address/number
         recipient = lead.email if campaign.channel == 'Email' else lead.phone
         if not recipient:
             continue
-            
+
+        # --- Skip already-sent or currently-processing recipients for THIS run ---
+        already_handled = Message.objects.filter(
+            campaign_run=run,
+            lead=lead,
+            status__in=['Processing', 'Sent', 'Delivered', 'Opened', 'Replied']
+        ).exists()
+        if already_handled:
+            continue
+
         body_content = campaign.message_content if campaign.message_content else (campaign.template.body if campaign.template else '')
-        rendered_body = render_template(body_content, lead)
-        
+        render_template(body_content, lead)  # Validate template render; actual render in send_message_task
+
         msg = Message.objects.create(
             campaign_run=run,
             lead=lead,
@@ -374,9 +397,18 @@ def execute_campaign_run_task(campaign_run_id):
             recipient=recipient,
             status='Pending'
         )
-        
-        # Trigger sending.
-        # Use delay() if Redis is running, otherwise call synchronously to avoid connection delays.
+
+        # --- Random interval delay (applied BETWEEN messages, not before the first) ---
+        min_i = campaign.min_interval or 0
+        max_i = campaign.max_interval or 0
+        if not first_message and max_i > 0:
+            delay = random.randint(min_i, max_i)
+            if delay > 0:
+                time.sleep(delay)
+
+        first_message = False
+
+        # Dispatch send task using existing Redis/fallback pattern
         if is_redis_running():
             try:
                 send_message_task.delay(msg.id)
@@ -385,6 +417,16 @@ def execute_campaign_run_task(campaign_run_id):
         else:
             send_message_task(msg.id)
 
-    run.status = 'Completed'
-    run.completed_at = timezone.now()
-    run.save()
+    # Mark run complete only if not paused mid-way
+    campaign.refresh_from_db(fields=['status'])
+    if campaign.status == 'Active':
+        run.status = 'Completed'
+        run.completed_at = timezone.now()
+        run.save()
+        campaign.status = 'Completed'
+        campaign.save(update_fields=['status'])
+    else:
+        # Campaign was paused — mark run as Failed/Stopped so a new run can be created on resume
+        run.status = 'Failed'
+        run.completed_at = timezone.now()
+        run.save()

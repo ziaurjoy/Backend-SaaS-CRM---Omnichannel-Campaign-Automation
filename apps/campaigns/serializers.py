@@ -13,6 +13,15 @@ class CampaignSerializer(serializers.ModelSerializer):
     def get_template_name(self, obj):
         return obj.template.name if obj.template else None
 
+    def validate(self, data):
+        min_i = data.get('min_interval', getattr(self.instance, 'min_interval', 0) or 0)
+        max_i = data.get('max_interval', getattr(self.instance, 'max_interval', 0) or 0)
+        if min_i > max_i:
+            raise serializers.ValidationError(
+                {'max_interval': 'Maximum interval must be greater than or equal to minimum interval.'}
+            )
+        return data
+
 class CampaignRunSerializer(serializers.ModelSerializer):
     campaign_name = serializers.CharField(source='campaign.name', read_only=True)
 
@@ -20,3 +29,4 @@ class CampaignRunSerializer(serializers.ModelSerializer):
         model = CampaignRun
         fields = '__all__'
         read_only_fields = ('id', 'started_at')
+

@@ -27,6 +27,8 @@ class Campaign(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     schedule_type = models.CharField(max_length=20, choices=SCHEDULE_TYPE_CHOICES, default='Immediate')
     scheduled_time = models.DateTimeField(blank=True, null=True)
+    min_interval = models.PositiveIntegerField(default=0, help_text='Minimum seconds to wait between messages (0 = no delay)')
+    max_interval = models.PositiveIntegerField(default=0, help_text='Maximum seconds to wait between messages (0 = no delay)')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
