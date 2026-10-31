@@ -172,6 +172,15 @@ class GooglePlacesScraperService:
                 session=session,
             )
 
+            # Trigger automatic WhatsApp account verification for newly scraped/updated leads with phones
+            from apps.crm.tasks import trigger_bulk_whatsapp_verification
+            leads_to_verify_ids = [lead.id for lead in processed_leads if lead.phone and not lead.whatsapp_status]
+            if leads_to_verify_ids:
+                try:
+                    trigger_bulk_whatsapp_verification(leads_to_verify_ids)
+                except Exception as task_err:
+                    logger.warning(f"Failed to trigger automatic WhatsApp verification: {task_err}")
+
             session.pages_fetched = pages_fetched
             session.total_scraped = len(processed_leads)
             session.created_count = created_count
@@ -239,12 +248,18 @@ class GooglePlacesScraperService:
                 # Extract address
                 address = item.get('formattedAddress') or item.get('formatted_address', '')
 
-                # Extract phone (international preferred, fallback to national)
-                phone = (
+                # Extract phone (international preferred, fallback to national) and normalize to E.164
+                raw_phone = (
                     item.get('internationalPhoneNumber')
                     or item.get('nationalPhoneNumber')
                     or item.get('formatted_phone_number', '')
                 )
+                phone = raw_phone
+                if raw_phone:
+                    from apps.crm.services.phone_validator import validate_and_normalize_phone
+                    val = validate_and_normalize_phone(raw_phone, default_region=getattr(business, 'country', None))
+                    if val['is_valid'] and val['e164']:
+                        phone = val['e164']
 
                 # Extract website
                 website = item.get('websiteUri') or item.get('website', '')

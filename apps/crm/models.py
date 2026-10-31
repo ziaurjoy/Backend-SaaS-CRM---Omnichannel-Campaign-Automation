@@ -91,6 +91,11 @@ class Lead(models.Model):
     price_level = models.CharField(max_length=50, blank=True, null=True)
     google_metadata = models.JSONField(default=dict, blank=True)
     
+    # WhatsApp Detection & Verification
+    whatsapp_status = models.BooleanField(default=False, db_index=True)
+    whatsapp_verified_at = models.DateTimeField(blank=True, null=True)
+    whatsapp_jid = models.CharField(max_length=100, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -100,6 +105,7 @@ class Lead(models.Model):
             models.Index(fields=['business', 'place_id']),
             models.Index(fields=['business', 'name']),
             models.Index(fields=['business', 'stage']),
+            models.Index(fields=['business', 'whatsapp_status']),
             models.Index(fields=['business', 'created_at']),
         ]
         constraints = [

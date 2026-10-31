@@ -10,3 +10,4 @@ gunicorn>=21.2.0
 python-dotenv>=1.0.1
 requests==2.34.2
 dj-database-url==1.2
+phonenumbers>=9.0.0

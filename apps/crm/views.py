@@ -83,6 +83,14 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         source = self.request.query_params.get('source')
         if source:
             queryset = queryset.filter(source=source)
+
+        # Enable WhatsApp status filtering
+        whatsapp_status = self.request.query_params.get('whatsapp_status')
+        if whatsapp_status is not None:
+            if str(whatsapp_status).lower() in ['true', '1', 'yes']:
+                queryset = queryset.filter(whatsapp_status=True)
+            elif str(whatsapp_status).lower() in ['false', '0', 'no']:
+                queryset = queryset.filter(whatsapp_status=False)
         
         # Enable comprehensive search filtering
         search = self.request.query_params.get('search')
@@ -107,6 +115,7 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
                 'user_ratings_total', '-user_ratings_total',
                 'created_at', '-created_at',
                 'stage', '-stage',
+                'whatsapp_status', '-whatsapp_status',
             ]
             if ordering in valid_orderings:
                 queryset = queryset.order_by(ordering)
@@ -116,6 +125,84 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
             queryset = queryset.order_by('-created_at')
 
         return queryset
+
+    def perform_create(self, serializer):
+        from apps.crm.services.phone_validator import validate_and_normalize_phone
+        from apps.crm.tasks import trigger_lead_whatsapp_verification
+
+        raw_phone = serializer.validated_data.get('phone')
+        if raw_phone:
+            val = validate_and_normalize_phone(raw_phone, getattr(self.request.business, 'country', None))
+            normalized = val['e164'] if (val['is_valid'] and val['e164']) else raw_phone
+            lead = serializer.save(business=self.request.business, phone=normalized)
+            try:
+                trigger_lead_whatsapp_verification(lead.id)
+            except Exception as e:
+                logger.warning(f"Error triggering WhatsApp verification on lead create: {e}")
+        else:
+            serializer.save(business=self.request.business)
+
+    def perform_update(self, serializer):
+        from apps.crm.services.phone_validator import validate_and_normalize_phone
+        from apps.crm.tasks import trigger_lead_whatsapp_verification
+
+        old_phone = serializer.instance.phone
+        raw_phone = serializer.validated_data.get('phone')
+
+        if raw_phone and raw_phone != old_phone:
+            val = validate_and_normalize_phone(raw_phone, getattr(self.request.business, 'country', None))
+            normalized = val['e164'] if (val['is_valid'] and val['e164']) else raw_phone
+            lead = serializer.save(phone=normalized, whatsapp_status=False)
+            try:
+                trigger_lead_whatsapp_verification(lead.id, force_check=True)
+            except Exception as e:
+                logger.warning(f"Error triggering WhatsApp verification on lead update: {e}")
+        else:
+            serializer.save()
+
+    @action(detail=True, methods=['post'], url_path='verify_whatsapp')
+    def verify_whatsapp(self, request, pk=None):
+        """
+        Manually trigger or retry WhatsApp verification for a single lead.
+        """
+        from apps.crm.services.whatsapp_verifier import WhatsAppVerifierService
+        lead = self.get_object()
+        force = request.data.get('force', True)
+        verifier = WhatsAppVerifierService()
+        result = verifier.verify_lead(lead, force_check=bool(force))
+        lead.refresh_from_db()
+        serializer = self.get_serializer(lead)
+        return Response({
+            'message': 'WhatsApp verification completed.',
+            'result': result,
+            'lead': serializer.data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='verify_whatsapp_batch')
+    def verify_whatsapp_batch(self, request):
+        """
+        Bulk verify WhatsApp availability across multiple leads or an entire collection.
+        """
+        from apps.crm.tasks import trigger_bulk_whatsapp_verification
+        lead_ids = request.data.get('lead_ids', [])
+        collection_id = request.data.get('collection_id')
+        force = request.data.get('force', False)
+
+        queryset = self.get_queryset().filter(phone__isnull=False).exclude(phone='')
+        if lead_ids:
+            queryset = queryset.filter(id__in=lead_ids)
+        elif collection_id:
+            queryset = queryset.filter(collection_id=collection_id)
+
+        target_ids = list(queryset.values_list('id', flat=True))
+        if not target_ids:
+            return Response({'detail': 'No eligible phone-number leads found to verify.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        trigger_bulk_whatsapp_verification(target_ids, force_check=bool(force))
+        return Response({
+            'message': f'Verification queued for {len(target_ids)} lead(s).',
+            'count': len(target_ids)
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'], url_path='activities')
     def get_activities(self, request, pk=None):

@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from apps.tenants.models import Business
+from apps.tenants.models import Business, BusinessMember
 from apps.crm.models import Lead, LeadCollection, GooglePlaceScrapeSession, LeadActivity
 
 User = get_user_model()
@@ -23,6 +23,11 @@ class GooglePlacesIntegrationTestCase(TestCase):
         )
         self.user.business = self.business
         self.user.save()
+        BusinessMember.objects.create(
+            business=self.business,
+            user=self.user,
+            role='Owner'
+        )
         
         self.collection = LeadCollection.objects.create(
             business=self.business,
@@ -132,7 +137,7 @@ class GooglePlacesIntegrationTestCase(TestCase):
         self.assertEqual(lead1.name, 'Alpha Software Corp')
         self.assertEqual(lead1.phone, '+1 555-0101')
         self.assertEqual(lead1.primary_type, 'software_company')
-        self.assertEqual(lead1.rating, 4.8)
+        self.assertEqual(float(lead1.rating), 4.8)
 
         lead2 = Lead.objects.get(business=self.business, place_id='place_002')
         self.assertEqual(lead2.name, 'Beta Cloud Labs')
@@ -234,7 +239,7 @@ class GooglePlacesIntegrationTestCase(TestCase):
         self.assertEqual(updated_lead.address, "Updated New Address 999")
         self.assertEqual(float(updated_lead.rating), 4.9)
         self.assertEqual(updated_lead.user_ratings_total, 120)
-        self.assertEqual(updated_lead.phone, "+1 888-999-0000")
+        self.assertIn(updated_lead.phone, ["+18889990000", "+1 888-999-0000"])
 
     @patch('requests.post')
     def test_failure_recovery_on_google_api_error(self, mock_post):
@@ -295,3 +300,250 @@ class GooglePlacesIntegrationTestCase(TestCase):
         res_sort = self.client.get(f'/api/leads/?collection={self.collection.id}&ordering=-rating')
         first_lead = res_sort.data['results'][0]
         self.assertEqual(first_lead['name'], 'Business 5')
+
+
+class WhatsAppDetectionTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="wa_testuser",
+            email="wa_test@example.com",
+            password="password123"
+        )
+        self.business = Business.objects.create(
+            name="WA Test Business",
+            country="BD"
+        )
+        self.user.business = self.business
+        self.user.save()
+        BusinessMember.objects.create(
+            business=self.business,
+            user=self.user,
+            role='Owner'
+        )
+
+        from apps.messaging.models import Integration
+        self.integration = Integration.objects.create(
+            business=self.business,
+            provider='WhatsApp',
+            status='Connected',
+            connected_phone='+8801771833614',
+            credentials={
+                'link_type': 'WhatsApp_Standard_QR',
+                'session_id': f"wa_business_{self.business.id}"
+            }
+        )
+
+        self.collection = LeadCollection.objects.create(
+            business=self.business,
+            name="WA Leads Collection"
+        )
+        self.client.force_authenticate(user=self.user)
+        self.client.credentials(HTTP_X_BUSINESS_ID=str(self.business.id))
+
+    def test_phone_number_validation_and_e164_normalization(self):
+        """Test that various national and international phone formats normalize to E.164."""
+        from apps.crm.services.phone_validator import validate_and_normalize_phone, normalize_phone_e164
+
+        # Bangladesh local format with country code context
+        res_bd = validate_and_normalize_phone('01771833614', default_region='BD')
+        self.assertTrue(res_bd['is_valid'])
+        self.assertEqual(res_bd['e164'], '+8801771833614')
+
+        # US format with dashes and parentheses
+        res_us = validate_and_normalize_phone('+1 (415) 555-2671')
+        self.assertTrue(res_us['is_valid'])
+        self.assertEqual(res_us['e164'], '+14155552671')
+
+        # Invalid phone string
+        res_inv = validate_and_normalize_phone('not-a-number')
+        self.assertFalse(res_inv['is_valid'])
+        self.assertIsNone(res_inv['e164'])
+
+    @patch('requests.post')
+    def test_whatsapp_verification_success_sets_status_true(self, mock_post):
+        """When the WhatsApp microservice verifies a number, whatsapp_status becomes True."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'status': 'success',
+            'phone': '+8801771833614',
+            'e164': '+8801771833614',
+            'exists': True,
+            'jid': '8801771833614@s.whatsapp.net'
+        }
+        mock_post.return_value = mock_response
+
+        lead = Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="Verified Lead",
+            phone="01771833614"
+        )
+
+        from apps.crm.services.whatsapp_verifier import WhatsAppVerifierService
+        verifier = WhatsAppVerifierService()
+        result = verifier.verify_lead(lead, force_check=True)
+
+        lead.refresh_from_db()
+        self.assertTrue(result['whatsapp_status'])
+        self.assertTrue(lead.whatsapp_status)
+        self.assertEqual(lead.phone, '+8801771833614')
+        self.assertIsNotNone(lead.whatsapp_verified_at)
+        self.assertEqual(lead.whatsapp_jid, '8801771833614@s.whatsapp.net')
+
+        # Check that activity was logged
+        activity = lead.activities.filter(activity_type='WhatsApp').first()
+        self.assertIsNotNone(activity)
+        self.assertIn('+8801771833614', activity.description)
+
+    @patch('requests.post')
+    def test_whatsapp_verification_unregistered_keeps_status_false(self, mock_post):
+        """When number is not on WhatsApp, whatsapp_status remains False and no icon flag."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'status': 'success',
+            'phone': '+15550009999',
+            'e164': '+15550009999',
+            'exists': False,
+            'jid': None
+        }
+        mock_post.return_value = mock_response
+
+        lead = Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="Unregistered Lead",
+            phone="+15550009999"
+        )
+
+        from apps.crm.services.whatsapp_verifier import WhatsAppVerifierService
+        verifier = WhatsAppVerifierService()
+        result = verifier.verify_lead(lead, force_check=True)
+
+        lead.refresh_from_db()
+        self.assertFalse(result['whatsapp_status'])
+        self.assertFalse(lead.whatsapp_status)
+        self.assertIsNone(lead.whatsapp_verified_at)
+
+    @patch('requests.post')
+    def test_avoid_unnecessary_repeated_api_calls_if_already_verified(self, mock_post):
+        """Verify that previously verified leads skip redundant API calls unless force=True."""
+        lead = Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="Cached Lead",
+            phone="+8801771833614",
+            whatsapp_status=True
+        )
+
+        from apps.crm.services.whatsapp_verifier import WhatsAppVerifierService
+        verifier = WhatsAppVerifierService()
+        result = verifier.verify_lead(lead, force_check=False)
+
+        self.assertTrue(result.get('cached'))
+        mock_post.assert_not_called()
+
+    @patch('requests.post')
+    def test_automatic_verification_triggered_on_lead_creation(self, mock_post):
+        """Creating a lead via API automatically normalizes phone and triggers WhatsApp check."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'status': 'success',
+            'phone': '+8801771833614',
+            'e164': '+8801771833614',
+            'exists': True,
+            'jid': '8801771833614@s.whatsapp.net'
+        }
+        mock_post.return_value = mock_response
+
+        response = self.client.post('/api/leads/', {
+            'name': 'Auto-Check Lead',
+            'phone': '01771833614',
+            'collection': self.collection.id,
+            'source': 'Manual'
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        lead_id = response.data['id']
+        lead = Lead.objects.get(id=lead_id)
+        self.assertEqual(lead.phone, '+8801771833614')
+        self.assertTrue(lead.whatsapp_status)
+
+    @patch('requests.post')
+    def test_verify_whatsapp_detail_action(self, mock_post):
+        """Manual verification trigger on detail endpoint POST /api/leads/{id}/verify_whatsapp/"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'status': 'success',
+            'phone': '+8801771833614',
+            'e164': '+8801771833614',
+            'exists': True,
+            'jid': '8801771833614@s.whatsapp.net'
+        }
+        mock_post.return_value = mock_response
+
+        lead = Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="Manual Check Lead",
+            phone="+8801771833614",
+            whatsapp_status=False
+        )
+
+        response = self.client.post(f'/api/leads/{lead.id}/verify_whatsapp/', {'force': True}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['lead']['whatsapp_status'])
+
+    def test_filter_leads_by_whatsapp_status(self):
+        """Filtering /api/leads/?whatsapp_status=true returns only WhatsApp verified leads."""
+        Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="WA Lead 1",
+            phone="+8801771833614",
+            whatsapp_status=True
+        )
+        Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="Non-WA Lead 2",
+            phone="+15550009999",
+            whatsapp_status=False
+        )
+
+        res_true = self.client.get('/api/leads/?whatsapp_status=true')
+        self.assertEqual(res_true.status_code, status.HTTP_200_OK)
+        for item in res_true.data['results']:
+            self.assertTrue(item['whatsapp_status'])
+
+        res_false = self.client.get('/api/leads/?whatsapp_status=false')
+        self.assertEqual(res_false.status_code, status.HTTP_200_OK)
+        for item in res_false.data['results']:
+            self.assertFalse(item['whatsapp_status'])
+
+    @patch('requests.post')
+    def test_graceful_error_handling_on_service_failure(self, mock_post):
+        """API failures or service timeouts do not crash the system; whatsapp_status stays False."""
+        mock_post.side_effect = Exception("Connection refused to WhatsApp microservice")
+
+        lead = Lead.objects.create(
+            business=self.business,
+            collection=self.collection,
+            name="Resilient Lead",
+            phone="+8801771833614",
+            whatsapp_status=False
+        )
+
+        from apps.crm.services.whatsapp_verifier import WhatsAppVerifierService
+        verifier = WhatsAppVerifierService()
+        result = verifier.verify_lead(lead, force_check=True)
+
+        lead.refresh_from_db()
+        self.assertFalse(lead.whatsapp_status)
+        self.assertEqual(result['status'], 'service_error')
+        self.assertIn("Could not connect to WhatsApp verification service", result['error'])
+
