@@ -1,23 +1,38 @@
 import os
 import time
-import random
-import requests
-from urllib.parse import urlparse
+import logging
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from apps.tenants.utils import TenantModelViewSetMixin
+from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
-from apps.crm.models import Lead, Tag, LeadActivity, LeadCollection
-from apps.crm.serializers import LeadSerializer, TagSerializer, LeadActivitySerializer, LeadCollectionSerializer
+
+from apps.tenants.utils import TenantModelViewSetMixin
+from apps.crm.models import Lead, Tag, LeadActivity, LeadCollection, GooglePlaceScrapeSession
+from apps.crm.serializers import (
+    LeadSerializer,
+    TagSerializer,
+    LeadActivitySerializer,
+    LeadCollectionSerializer,
+    GooglePlaceScrapeSessionSerializer
+)
+from apps.crm.services.places_scraper import GooglePlacesScraperService
+
+from config.pagination import StandardResultsSetPagination
+
+logger = logging.getLogger(__name__)
+
+LeadPagination = StandardResultsSetPagination
 
 class TagViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
     queryset = Tag.objects.all()
     serializer_class = TagSerializer
+    pagination_class = StandardResultsSetPagination
 
 class LeadCollectionViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
     queryset = LeadCollection.objects.all()
     serializer_class = LeadCollectionSerializer
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -26,23 +41,50 @@ class LeadCollectionViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(name__icontains=search) | Q(description__icontains=search)
             )
-        return queryset
+        return queryset.order_by('-created_at')
+
+class GooglePlaceScrapeSessionViewSet(TenantModelViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    queryset = GooglePlaceScrapeSession.objects.all()
+    serializer_class = GooglePlaceScrapeSessionSerializer
+    pagination_class = StandardResultsSetPagination
 
 class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
     queryset = Lead.objects.all()
     serializer_class = LeadSerializer
+    pagination_class = LeadPagination
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        # Enable basic stage filtering
+        
+        # Enable stage filtering
         stage = self.request.query_params.get('stage')
         if stage:
             queryset = queryset.filter(stage=stage)
-        collection_id = self.request.query_params.get('collection')
+            
+        # Enable collection filtering
+        collection_id = self.request.query_params.get('collection') or self.request.query_params.get('collection_id')
         if collection_id:
             queryset = queryset.filter(collection_id=collection_id)
+
+        # Enable business_status filtering
+        business_status = self.request.query_params.get('business_status')
+        if business_status:
+            queryset = queryset.filter(business_status=business_status)
+
+        # Enable minimum rating filtering
+        min_rating = self.request.query_params.get('min_rating') or self.request.query_params.get('rating')
+        if min_rating:
+            try:
+                queryset = queryset.filter(rating__gte=float(min_rating))
+            except ValueError:
+                pass
+
+        # Enable source filtering
+        source = self.request.query_params.get('source')
+        if source:
+            queryset = queryset.filter(source=source)
         
-        # Enable search filtering
+        # Enable comprehensive search filtering
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -50,8 +92,29 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
                 Q(email__icontains=search) |
                 Q(phone__icontains=search) |
                 Q(website__icontains=search) |
-                Q(address__icontains=search)
+                Q(address__icontains=search) |
+                Q(primary_type__icontains=search) |
+                Q(primary_type_display_name__icontains=search) |
+                Q(place_id__icontains=search)
             )
+
+        # Sorting / ordering
+        ordering = self.request.query_params.get('ordering')
+        if ordering:
+            valid_orderings = [
+                'name', '-name',
+                'rating', '-rating',
+                'user_ratings_total', '-user_ratings_total',
+                'created_at', '-created_at',
+                'stage', '-stage',
+            ]
+            if ordering in valid_orderings:
+                queryset = queryset.order_by(ordering)
+            else:
+                queryset = queryset.order_by('-created_at')
+        else:
+            queryset = queryset.order_by('-created_at')
+
         return queryset
 
     @action(detail=True, methods=['get'], url_path='activities')
@@ -72,109 +135,73 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='scrape_google_places')
     def scrape_google_places(self, request):
-        query = request.data.get('query')
+        text_query = request.data.get('textQuery') or request.data.get('query')
+        page_size = request.data.get('pageSize') or request.data.get('page_size', 20)
         collection_id = request.data.get('collection_id') or request.data.get('collection')
-        if not query:
-            return Response({'detail': 'query parameter is required.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not collection_id:
-            return Response({'detail': 'collection_id or collection parameter is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        max_pages = request.data.get('maxPages') or request.data.get('max_pages')
+        page_token = request.data.get('pageToken') or request.data.get('page_token')
+        fetch_all_pages = request.data.get('fetchAllPages', request.data.get('fetch_all_pages', True))
+
+        if not text_query or not str(text_query).strip():
+            return Response(
+                {'detail': 'textQuery (or query) parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        collection = None
+        if collection_id:
+            try:
+                collection = LeadCollection.objects.get(id=collection_id, business=request.business)
+            except LeadCollection.DoesNotExist:
+                return Response({'detail': 'Collection not found.'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            # Create or use default collection for backward compatibility
+            collection, _ = LeadCollection.objects.get_or_create(
+                business=request.business,
+                name="Scraped Leads",
+                defaults={'description': 'Automatically created collection for scraped leads.'}
+            )
 
         try:
-            collection = LeadCollection.objects.get(id=collection_id, business=request.business)
-        except LeadCollection.DoesNotExist:
-            return Response({'detail': 'Collection not found.'}, status=status.HTTP_404_NOT_FOUND)
+            scraper = GooglePlacesScraperService()
+            result = scraper.scrape_places(
+                business=request.business,
+                text_query=str(text_query).strip(),
+                collection=collection,
+                user=request.user,
+                page_size=page_size,
+                max_pages=int(max_pages) if max_pages else None,
+                page_token=page_token,
+                fetch_all_pages=bool(fetch_all_pages),
+            )
 
-        api_key = os.environ.get('GOOGLE_PLACES_API_KEY')
-        scraped_leads = []
+            serializer = LeadSerializer(result['leads'], many=True, context={'request': request})
+            return Response({
+                'message': result['message'],
+                'session_id': result['session_id'],
+                'pages_fetched': result['pages_fetched'],
+                'total_scraped': result['total_scraped'],
+                'created_count': result['created_count'],
+                'updated_count': result['updated_count'],
+                'has_more': result['has_more'],
+                'next_page_token': result['next_page_token'],
+                'leads': serializer.data,
+            }, status=status.HTTP_201_CREATED)
 
-        next_page_token = None
-        pages_fetched = 0
-        
-        try:
-            while pages_fetched < 3:
-                url = f"https://maps.googleapis.com/maps/api/place/textsearch/json?query={query}&key={api_key}"
-                if next_page_token:
-                    url += f"&pagetoken={next_page_token}"
-                    
-                r = requests.get(url)
-                if r.status_code != 200:
-                    return Response({'detail': f'Google API returned error: {r.text}'}, status=status.HTTP_400_BAD_REQUEST)
-                    
-                data = r.json()
-                results = data.get('results', [])
-                for item in results:
-                    name = item.get('name')
-                    address = item.get('formatted_address', '')
-                    rating = item.get('rating')
-                    place_id = item.get('place_id')
-                    
-                    # Get details (phone, website, ratings, location, types, status)
-                    phone = ''
-                    website = ''
-                    details = {}
-                    
-                    fields = "formatted_phone_number,website,user_ratings_total,geometry,business_status,types"
-                    details_url = f"https://maps.googleapis.com/maps/api/place/details/json?place_id={place_id}&fields={fields}&key={api_key}"
-                    
-                    dr = requests.get(details_url)
-                    if dr.status_code == 200:
-                        details = dr.json().get('result', {})
-                        phone = details.get('formatted_phone_number', '')
-                        website = details.get('website', '')
-
-                    if not Lead.objects.filter(business=request.business, name=name).exists():
-
-                        # Extract metadata values
-                        user_ratings_total = details.get('user_ratings_total', item.get('user_ratings_total', 0))
-                        business_status = details.get('business_status', item.get('business_status', ''))
-                        types = details.get('types', item.get('types', []))
-                        location = details.get('geometry', {}).get('location', item.get('geometry', {}).get('location', {}))
-                        lat = location.get('lat')
-                        lng = location.get('lng')
-
-                        # Merge both result lists to save all response details
-                        google_metadata = {**item, **details}
-
-                        lead = Lead.objects.create(
-                            business=request.business,
-                            collection=collection,
-                            name=name,
-                            email='',
-                            phone=phone,
-                            website=website,
-                            address=address,
-                            rating=rating,
-                            source="Google Places API",
-                            place_id=place_id,
-                            user_ratings_total=user_ratings_total,
-                            latitude=lat,
-                            longitude=lng,
-                            business_status=business_status,
-                            types=types,
-                            google_metadata=google_metadata
-                        )
-                        LeadActivity.objects.create(
-                            lead=lead,
-                            activity_type="Log",
-                            description=f"Lead automatically created via Google Places API search for '{query}'."
-                        )
-                        scraped_leads.append(lead)
-                        
-                next_page_token = data.get('next_page_token')
-                pages_fetched += 1
-                
-                if not next_page_token:
-                    break
-                
-                # Google requires a small delay before the next page token is activated
-                time.sleep(2)
-                
-            mode_used = f"Google Places API Live ({pages_fetched} pages)"
+        except ValueError as ve:
+            return Response({'detail': str(ve)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            return Response({'detail': f'Failed to search Google Places API: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.exception("Error in scrape_google_places endpoint")
+            return Response(
+                {'detail': f'Failed to search Google Places API: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-        serializer = LeadSerializer(scraped_leads, many=True)
-        return Response({
-            "message": f"Successfully imported {len(scraped_leads)} leads using {mode_used}.",
-            "leads": serializer.data
-        }, status=status.HTTP_201_CREATED)
+    @action(detail=False, methods=['get'], url_path='scrape_sessions')
+    def scrape_sessions(self, request):
+        sessions = GooglePlaceScrapeSession.objects.filter(
+            business=request.business
+        ).order_by('-created_at')[:20]
+        serializer = GooglePlaceScrapeSessionSerializer(sessions, many=True)
+        return Response(serializer.data)
+

@@ -15,7 +15,16 @@ class LeadActivitySerializer(serializers.ModelSerializer):
         fields = ('id', 'lead', 'user', 'username', 'activity_type', 'description', 'created_at')
         read_only_fields = ('id', 'created_at')
 
-from apps.crm.models import Lead, Tag, LeadActivity, LeadCollection
+from apps.crm.models import Lead, Tag, LeadActivity, LeadCollection, GooglePlaceScrapeSession
+
+class GooglePlaceScrapeSessionSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    collection_name = serializers.CharField(source='collection.name', read_only=True)
+
+    class Meta:
+        model = GooglePlaceScrapeSession
+        fields = '__all__'
+        read_only_fields = ('id', 'business', 'created_at', 'updated_at')
 
 class LeadCollectionSerializer(serializers.ModelSerializer):
     leads_count = serializers.IntegerField(source='leads.count', read_only=True)

@@ -148,9 +148,31 @@ def generate_contextual_fallback_templates(prompt, channel_type, tone, provider)
     return [opt1, opt2, opt3]
 
 
+from django.db.models import Q
+from config.pagination import StandardResultsSetPagination
+
 class TemplateViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
     queryset = Template.objects.all()
     serializer_class = TemplateSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(subject__icontains=search) | Q(body__icontains=search)
+            )
+        channel_type = self.request.query_params.get('type')
+        if channel_type:
+            queryset = queryset.filter(type=channel_type)
+        ordering = self.request.query_params.get('ordering', '-created_at')
+        valid_orderings = ['name', '-name', 'created_at', '-created_at', 'type', '-type']
+        if ordering in valid_orderings:
+            queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at')
+        return queryset
 
     @action(detail=False, methods=['post'], url_path='generate_ai')
     def generate_ai(self, request):

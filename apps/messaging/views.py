@@ -2,6 +2,8 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.conf import settings
+from django.db.models import Q
+from config.pagination import StandardResultsSetPagination
 from apps.tenants.utils import IsTenantMember, TenantModelViewSetMixin
 from apps.messaging.models import Message, Integration
 from apps.messaging.serializers import MessageSerializer, IntegrationSerializer
@@ -9,10 +11,24 @@ from apps.messaging.serializers import MessageSerializer, IntegrationSerializer
 class MessageViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MessageSerializer
     permission_classes = [IsTenantMember]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         # Filter messages belonging to the current active tenant
-        return Message.objects.filter(lead__business=self.request.business).order_by('-created_at')
+        queryset = Message.objects.filter(lead__business=self.request.business)
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(lead__name__icontains=search) | Q(recipient__icontains=search)
+            )
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        channel = self.request.query_params.get('channel')
+        if channel:
+            queryset = queryset.filter(channel=channel)
+        ordering = self.request.query_params.get('ordering', '-created_at')
+        return queryset.order_by(ordering)
 
 class IntegrationViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
     queryset = Integration.objects.all()

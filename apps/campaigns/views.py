@@ -2,6 +2,8 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
+from django.db.models import Q
+from config.pagination import StandardResultsSetPagination
 from apps.tenants.utils import TenantModelViewSetMixin
 from apps.campaigns.models import Campaign, CampaignRun
 from apps.campaigns.serializers import CampaignSerializer, CampaignRunSerializer
@@ -9,6 +11,28 @@ from apps.campaigns.serializers import CampaignSerializer, CampaignRunSerializer
 class CampaignViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
     queryset = Campaign.objects.all()
     serializer_class = CampaignSerializer
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        channel = self.request.query_params.get('channel')
+        if channel:
+            queryset = queryset.filter(channel=channel)
+        ordering = self.request.query_params.get('ordering', '-created_at')
+        valid_orderings = ['name', '-name', 'created_at', '-created_at', 'status', '-status']
+        if ordering in valid_orderings:
+            queryset = queryset.order_by(ordering)
+        else:
+            queryset = queryset.order_by('-created_at')
+        return queryset
 
     @action(detail=True, methods=['post'], url_path='trigger')
     def trigger_campaign(self, request, pk=None):
@@ -160,16 +184,36 @@ class CampaignViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
             campaign_run__campaign=campaign
         ).select_related('lead', 'campaign_run', 'campaign_run__campaign')
 
+        search = request.query_params.get('search')
+        if search:
+            messages = messages.filter(
+                Q(lead__name__icontains=search) |
+                Q(recipient__icontains=search)
+            )
+
+        status_param = request.query_params.get('status')
+        if status_param:
+            messages = messages.filter(status=status_param)
+
+        ordering = request.query_params.get('ordering', '-created_at')
+        messages = messages.order_by(ordering)
+
+        page = self.paginate_queryset(messages)
+        if page is not None:
+            serializer = MessageSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
         serializer = MessageSerializer(messages, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 class CampaignRunViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CampaignRunSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         # Return campaign runs belonging to the user's active tenant
         business_id = self.request.headers.get('X-Business-ID') or self.request.query_params.get('business_id')
         if not business_id:
             return CampaignRun.objects.none()
-        return CampaignRun.objects.filter(campaign__business_id=business_id)
+        return CampaignRun.objects.filter(campaign__business_id=business_id).order_by('-created_at')
