@@ -105,6 +105,7 @@ class Lead(models.Model):
             models.Index(fields=['business', 'place_id']),
             models.Index(fields=['business', 'name']),
             models.Index(fields=['business', 'stage']),
+            models.Index(fields=['business', 'source']),
             models.Index(fields=['business', 'whatsapp_status']),
             models.Index(fields=['business', 'created_at']),
         ]

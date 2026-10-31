@@ -1,9 +1,11 @@
+from datetime import timedelta
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 from rest_framework import status
 
-from apps.tenants.models import Business
+from apps.tenants.models import Business, BusinessMember
 from apps.crm.models import Lead, LeadCollection
 from apps.campaigns.models import Campaign, CampaignRun
 from apps.templates.models import Template
@@ -48,6 +50,11 @@ class StandardResultsSetPaginationTestCase(TestCase):
 
     def test_pagination_metadata_and_limits(self):
         """Verifies total_pages, page, count, page_size, next, and previous across multi-page dataset."""
+        BusinessMember.objects.get_or_create(
+            business=self.business,
+            user=self.user,
+            defaults={'role': 'Owner'},
+        )
         collection = LeadCollection.objects.create(
             business=self.business,
             name="Pagination Leads"
@@ -95,6 +102,109 @@ class StandardResultsSetPaginationTestCase(TestCase):
         """Verifies that requesting a page beyond total_pages returns 404."""
         response = self.client.get('/api/leads/?page=999&page_size=10')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_lead_search_and_combined_filters(self):
+        BusinessMember.objects.get_or_create(
+            business=self.business,
+            user=self.user,
+            defaults={'role': 'Owner'},
+        )
+        collection = LeadCollection.objects.create(
+            business=self.business,
+            name="Search and Filter Leads"
+        )
+        matching_lead = Lead.objects.create(
+            business=self.business,
+            collection=collection,
+            name="Northwind Software",
+            email="sales@northwind.example",
+            phone="+15551230000",
+            address="Dhaka, Bangladesh",
+            source="Google Places",
+            stage="Qualified",
+            primary_type="software_company",
+            primary_type_display_name="Software Company",
+            whatsapp_status=True,
+        )
+        older_lead = Lead.objects.create(
+            business=self.business,
+            collection=collection,
+            name="Older Northwind Software",
+            email="old@northwind.example",
+            phone="+15551239999",
+            address="Dhaka, Bangladesh",
+            source="Google Places",
+            stage="Qualified",
+            primary_type="software_company",
+            primary_type_display_name="Software Company",
+            whatsapp_status=True,
+        )
+        Lead.objects.filter(pk=older_lead.pk).update(
+            created_at=timezone.now() - timedelta(days=2)
+        )
+        Lead.objects.create(
+            business=self.business,
+            collection=collection,
+            name="Other Business",
+            email="contact@other.example",
+            phone="+15550000000",
+            address="London, UK",
+            source="Manual",
+            stage="New",
+            primary_type="restaurant",
+            whatsapp_status=False,
+        )
+
+        for search in (
+            "NORTHWIND",
+            "SALES@NORTHWIND.EXAMPLE",
+            "5551230000",
+            "software_company",
+        ):
+            with self.subTest(search=search):
+                response = self.client.get(
+                    '/api/leads/',
+                    {'collection': collection.id, 'search': search}
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(
+                    response.data['count'],
+                    2 if search in ("NORTHWIND", "software_company") else 1,
+                )
+
+        response = self.client.get('/api/leads/', {
+            'collection': collection.id,
+            'search': 'northwind',
+            'stage': 'Qualified',
+            'source': 'Google Places',
+            'whatsapp_status': 'true',
+            'address': 'Bangladesh',
+            'primary_type': 'software',
+            'created_after': timezone.localdate().isoformat(),
+            'created_before': timezone.localdate().isoformat(),
+            'page': 1,
+            'page_size': 1,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertEqual(response.data['results'][0]['id'], matching_lead.id)
+
+    def test_invalid_lead_date_filters_return_validation_errors(self):
+        BusinessMember.objects.get_or_create(
+            business=self.business,
+            user=self.user,
+            defaults={'role': 'Owner'},
+        )
+        invalid_date = self.client.get('/api/leads/?created_after=not-a-date')
+        self.assertEqual(invalid_date.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('created_after', invalid_date.data)
+
+        reversed_range = self.client.get(
+            '/api/leads/?created_after=2026-10-02&created_before=2026-10-01'
+        )
+        self.assertEqual(reversed_range.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('created_before', reversed_range.data)
 
     def test_max_page_size_enforcement(self):
         """Verifies that page_size is capped at max_page_size (100)."""

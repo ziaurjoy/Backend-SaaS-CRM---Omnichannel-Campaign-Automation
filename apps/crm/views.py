@@ -1,8 +1,12 @@
 import os
 import time
 import logging
+from datetime import datetime, time as datetime_time, timedelta
+from django.utils.dateparse import parse_date
+from django.utils import timezone
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
@@ -82,7 +86,45 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         # Enable source filtering
         source = self.request.query_params.get('source')
         if source:
-            queryset = queryset.filter(source=source)
+            queryset = queryset.filter(source__icontains=source)
+
+        # Address is the available location field on Lead; country is accepted as
+        # an alias because formatted addresses include the country when available.
+        location = (
+            self.request.query_params.get('address')
+            or self.request.query_params.get('location')
+            or self.request.query_params.get('country')
+        )
+        if location:
+            queryset = queryset.filter(address__icontains=location)
+
+        industry = (
+            self.request.query_params.get('industry')
+            or self.request.query_params.get('primary_type')
+        )
+        if industry:
+            queryset = queryset.filter(
+                Q(primary_type__icontains=industry)
+                | Q(primary_type_display_name__icontains=industry)
+            )
+
+        created_after = self.request.query_params.get('created_after')
+        created_before = self.request.query_params.get('created_before')
+        after_date = parse_date(created_after) if created_after else None
+        before_date = parse_date(created_before) if created_before else None
+        if created_after and after_date is None:
+            raise ValidationError({'created_after': 'Use a valid YYYY-MM-DD date.'})
+        if created_before and before_date is None:
+            raise ValidationError({'created_before': 'Use a valid YYYY-MM-DD date.'})
+        if after_date and before_date and after_date > before_date:
+            raise ValidationError({'created_before': 'Must be on or after created_after.'})
+        if after_date:
+            after_datetime = timezone.make_aware(datetime.combine(after_date, datetime_time.min))
+            queryset = queryset.filter(created_at__gte=after_datetime)
+        if before_date:
+            day_after = before_date + timedelta(days=1)
+            before_datetime = timezone.make_aware(datetime.combine(day_after, datetime_time.min))
+            queryset = queryset.filter(created_at__lt=before_datetime)
 
         # Enable WhatsApp status filtering
         whatsapp_status = self.request.query_params.get('whatsapp_status')
@@ -291,4 +333,3 @@ class LeadViewSet(TenantModelViewSetMixin, viewsets.ModelViewSet):
         ).order_by('-created_at')[:20]
         serializer = GooglePlaceScrapeSessionSerializer(sessions, many=True)
         return Response(serializer.data)
-
